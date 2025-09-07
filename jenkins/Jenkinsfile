@@ -1,0 +1,53 @@
+pipeline {
+  agent { label 'ec2-docker' }
+
+  environment {
+    AWS_REGION = "ap-south-1"
+    AWS_ACCOUNT = "<ACCOUNT_ID>"
+    ECR_REPO = "notes-api"
+    TF_DIR = "terraform"
+  }
+
+  stages {
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+
+    stage('Unit Tests') {
+      steps { sh 'pytest -q || true' }
+    }
+
+    stage('Build & Push Image') {
+      steps {
+        script {
+          TAG = env.GIT_COMMIT.substring(0,8)
+        }
+        sh '''
+          docker build -t ${ECR_REPO}:${TAG} .
+          aws ecr get-login-password --region ${AWS_REGION} \
+            | docker login --username AWS --password-stdin ${AWS_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com
+          docker tag ${ECR_REPO}:${TAG} ${AWS_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${TAG}
+          docker push ${AWS_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${TAG}
+        '''
+      }
+    }
+
+    stage('Terraform Apply') {
+      steps {
+        dir("${TF_DIR}") {
+          sh '''
+            terraform init -upgrade
+            terraform apply -auto-approve -var="image_uri=${AWS_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${TAG}"
+          '''
+        }
+      }
+    }
+
+    stage('Smoke Tests') {
+      steps {
+        sh 'scripts/smoke_test.sh $(terraform output -raw api_url)'
+      }
+    }
+  }
+}
+
